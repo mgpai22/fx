@@ -2575,10 +2575,18 @@ export async function createFxEngine(options = {}) {
           throw new DOMException("Aborted", "AbortError");
         }
         if (!hostFetch) throw new TypeError("fetch is unavailable");
+        // Extra headers for a custom provider ride along with or without a key.
+        let withExtra = init;
+        const extra = options.customProvider?.headers;
+        if (extra && endpoint === options.customProvider.chatUrl) {
+          const merged = new Headers(init.headers ?? {});
+          for (const [key, value] of Object.entries(extra)) if (!merged.has(key)) merged.set(key, value);
+          withExtra = { ...init, headers: merged };
+        }
         const spec = providerAuth?.specFor(endpoint);
         const response = spec
-          ? await providerAuth.fetch(spec, endpoint, hostFetch, input, init)
-          : await hostFetch(input, init);
+          ? await providerAuth.fetch(spec, endpoint, hostFetch, input, withExtra)
+          : await hostFetch(input, withExtra);
         const headers = response.headers;
         emit("transport.response", {
           attempt,

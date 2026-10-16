@@ -675,6 +675,8 @@ export interface FxCustomProviderDefinition {
   name: string;
   /** The API prefix: requests go to `{baseUrl}/chat/completions`. HTTPS, or HTTP on localhost. */
   baseUrl: string;
+  /** Extra headers on every request to the provider's chat URL, such as router keys. Never `authorization`. */
+  headers?: Record<string, string>;
   /** The models it serves, by id. */
   models?: Record<string, FxCustomProviderModel>;
 }

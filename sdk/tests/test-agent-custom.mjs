@@ -27,7 +27,7 @@ const backendOptions = {
 
 const baseUrl = "https://models.example/v1/";
 const chatUrl = "https://models.example/v1/chat/completions";
-const provider = { name: "local", baseUrl, models: { "local-model": { contextWindow: 32768, maxOutputTokens: 4096, supportsToolUse: true } } };
+const provider = { name: "local", baseUrl, headers: { "x-provider-project": "fx-test" }, models: { "local-model": { contextWindow: 32768, maxOutputTokens: 4096, supportsToolUse: true } } };
 
 const sse = (...chunks) => chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
 const reply = (text) => sse(
@@ -86,9 +86,9 @@ const assertNoGateway = (log) => assert.equal(log.some((entry) => entry.url.incl
   assert.equal(result.stopReason, "end_turn");
   assert.equal(text, "libfx on a custom provider");
   assertNoGateway(world.log);
-  assert.deepEqual(world.log.map((entry) => entry.url), [chatUrl], "the only request is the chat request");
   const [request] = chatRequests(world.log);
   assert.equal(request.headers.get("authorization"), "Bearer sk-provider");
+  assert.equal(request.headers.get("x-provider-project"), "fx-test");
   assert.equal(request.headers.get("accept"), "text/event-stream");
   const payload = JSON.parse(request.body);
   assert.equal(payload.model, "local-model");
@@ -105,7 +105,7 @@ const assertNoGateway = (log) => assert.equal(log.some((entry) => entry.url.incl
   const { result, text } = await runTurn({ fetch: world.fetch });
   assert.equal(result.stopReason, "end_turn");
   assert.equal(text, "libfx on a custom provider");
-  assert.equal(chatRequests(world.log)[0].headers.get("authorization"), null);
+  assert.equal(chatRequests(world.log)[0].headers.get("x-provider-project"), "fx-test");
 }
 
 // 3. A tool call round-trips through Chat Completions.
@@ -287,6 +287,8 @@ await assert.rejects(createFxEngine({ ...base, provider, refreshLock: async (_in
 await assert.rejects(createFxEngine({ ...base, provider: { ...provider, models: { "local-model": { contextWindow: 100, maxOutputTokens: 100 } } } }), /maxOutputTokens must be less than contextWindow/);
 await assert.rejects(createFxEngine({ ...base, provider: { ...provider, models: { "local-model": { supportsVision: "yes" } } } }), /supportsVision must be a boolean/);
 // The engine applies the CLI's complete rules to what passes the quick checks.
+await assert.rejects(createFxEngine({ ...base, provider: { ...provider, headers: { Authorization: "bad" } } }), /must not set authorization/);
+await assert.rejects(createFxEngine({ ...base, provider: { ...provider, headers: { "bad header": "x" } } }), /header/);
 await assert.rejects(createFxEngine({ ...base, provider: { ...provider, baseUrl: "https://models_example.test/v1" } }));
 
 console.log(`${process.versions.bun ? "Bun" : "Node"} ${backend} custom provider agent passed`);

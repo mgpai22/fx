@@ -10,7 +10,7 @@ const encoder = new TextEncoder();
 const reservedNames = new Set(["gateway", "codex", "grok"]);
 const namePattern = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-const providerFields = new Set(["name", "baseUrl", "models"]);
+const providerFields = new Set(["name", "baseUrl", "models", "headers"]);
 // libfx option names to the CLI's settings names, which the engine parses.
 const modelFields = {
   contextWindow: "context_window",
@@ -86,7 +86,7 @@ export function customProviderDefinition(provider) {
   for (const field of Object.keys(provider)) {
     if (!providerFields.has(field)) throw new TypeError(`a custom provider has unknown field ${field}`);
   }
-  const { name, baseUrl, models } = provider;
+  const { name, baseUrl, models, headers } = provider;
   if (typeof name !== "string" || !namePattern.test(name) || reservedNames.has(name.toLowerCase())) {
     throw new TypeError("provider.name must be a letter followed by letters, digits, _ or -, at most 64 characters, and not gateway, codex or grok");
   }
@@ -98,7 +98,21 @@ export function customProviderDefinition(provider) {
     auth: { type: "none" },
     ...(models === undefined ? {} : { model_metadata: modelMetadata(models) }),
   };
-  return { name, chatUrl, json: JSON.stringify({ [name]: definition }) };
+  return { name, chatUrl, headers: extraHeaders(headers), json: JSON.stringify({ [name]: definition }) };
+}
+
+// Extra headers for every request to the provider's chat URL, added at the
+// fetch edge like the key, so they never enter the engine or a saved session.
+function extraHeaders(headers) {
+  if (headers === undefined) return undefined;
+  if (!isPlainObject(headers)) throw new TypeError("provider.headers must be an object of header names to strings");
+  const checked = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    if (typeof value !== "string") throw new TypeError(`provider.headers["${name}"] must be a string`);
+    if (name.toLowerCase() === "authorization") throw new TypeError("provider.headers must not set authorization; pass credentials instead");
+    checked.set(name, value);
+  }
+  return Object.fromEntries(checked);
 }
 
 /**
@@ -107,7 +121,8 @@ export function customProviderDefinition(provider) {
  * names the agent's session. A key has no refresh token, so it is never
  * refreshed, and a rejected request returns as it is.
  */
-export function customProviderSpec({ name, chatUrl }, sessionId) {
+export function customProviderSpec({ name, chatUrl, headers }, sessionId) {
+  const extra = headers ?? {};
   return {
     provider: name,
     matches: (endpoint) => endpoint === chatUrl,
@@ -116,8 +131,9 @@ export function customProviderSpec({ name, chatUrl }, sessionId) {
       if (!isPlainObject(value)) throw new TypeError("credentials() must return { apiKey } for a custom provider");
       return { accessToken: tokenString(value.apiKey, "apiKey", true, `provider "${name}"`) };
     },
-    authorize(headers, _endpoint, credentials) {
-      headers.set("authorization", `Bearer ${credentials.accessToken}`);
+    authorize(into, _endpoint, credentials) {
+      for (const [key, value] of Object.entries(extra)) into.set(key, value);
+      into.set("authorization", `Bearer ${credentials.accessToken}`);
     },
   };
 }
