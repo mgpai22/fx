@@ -2183,7 +2183,7 @@ const GatewayCancelWatcher = struct {
                 if (watch.phase.load(.seq_cst) == .completed) return;
             }
             previous = current;
-            io_mod.sleep(10 * std.time.ns_per_ms);
+            io_mod.sleep(1 * std.time.ns_per_ms);
         }
     }
 };
