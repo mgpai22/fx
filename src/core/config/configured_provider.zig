@@ -9,6 +9,9 @@ pub const max_id_bytes = 64;
 pub const max_model_bytes = 1024;
 const max_url_bytes = 2048;
 const max_env_bytes = 128;
+pub const max_headers = 16;
+pub const max_header_name_bytes = 128;
+pub const max_header_value_bytes = 4096;
 const max_json_bytes = 1024 * 1024;
 
 pub const ParseError = Allocator.Error || error{
@@ -28,6 +31,7 @@ pub const ParseError = Allocator.Error || error{
     InvalidToolChoiceMode,
     InvalidModelId,
     InvalidModelMetadata,
+    InvalidHeaders,
 };
 
 pub const Protocol = enum { @"openai-chat-completions" };
@@ -40,6 +44,11 @@ pub const Auth = union(enum) {
     bearer: []const u8,
 };
 
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
 pub const ModelMetadata = struct {
     id: []const u8,
     context_window: ?u32 = null,
@@ -47,7 +56,6 @@ pub const ModelMetadata = struct {
     supports_tool_use: ?bool = null,
     supports_vision: ?bool = null,
 };
-
 /// Registry owns all slices. Treat definitions as immutable while borrowed by
 /// requests; destroying the registry invalidates every definition and lookup.
 pub const Definition = struct {
@@ -58,6 +66,10 @@ pub const Definition = struct {
     tool_choice_mode: ToolChoiceMode = .omit,
     reviewer_model: ?[]const u8 = null,
     model_metadata: []const ModelMetadata = &.{},
+    /// Static extra headers for every request to this provider (never
+    /// authorization). Transport detail, not identity: excluded from the
+    /// binding hash so header-only rotation never invalidates a session.
+    headers: []const Header = &.{},
 
     /// Caller owns the returned URL. base_url is already a validated API prefix.
     pub fn chat_url(self: Definition, alloc: Allocator) Allocator.Error![]u8 {
@@ -100,6 +112,11 @@ pub const Definition = struct {
         if (self.reviewer_model) |id| alloc.free(id);
         for (self.model_metadata) |metadata| alloc.free(metadata.id);
         alloc.free(self.model_metadata);
+        for (self.headers) |header| {
+            alloc.free(header.name);
+            alloc.free(header.value);
+        }
+        alloc.free(self.headers);
     }
 };
 
@@ -165,7 +182,7 @@ pub const Registry = struct {
 
 fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) ParseError!Definition {
     try validate_id(id);
-    try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata" });
+    try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata", "headers" });
     const protocol = try required(value, "protocol");
     if (protocol != .string or !std.mem.eql(u8, protocol.string, "openai-chat-completions")) return error.InvalidProtocol;
     const url = try required(value, "base_url");
@@ -198,6 +215,23 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
     };
     const owned_reviewer = if (reviewer) |model_id| try alloc.dupe(u8, model_id) else null;
     errdefer if (owned_reviewer) |model_id| alloc.free(model_id);
+    const owned_metadata = if (value.object.get("model_metadata")) |metadata| try parse_metadata(alloc, metadata) else &.{};
+    errdefer {
+        if (owned_metadata.len > 0) {
+            for (owned_metadata) |metadata| alloc.free(metadata.id);
+            alloc.free(owned_metadata);
+        }
+    }
+    const owned_headers = if (value.object.get("headers")) |headers| try parse_headers(alloc, headers) else &.{};
+    errdefer {
+        if (owned_headers.len > 0) {
+            for (owned_headers) |header| {
+                alloc.free(header.name);
+                alloc.free(header.value);
+            }
+            alloc.free(owned_headers);
+        }
+    }
     return .{
         .id = owned_id,
         .protocol = .@"openai-chat-completions",
@@ -205,7 +239,8 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
         .auth = owned_auth,
         .tool_choice_mode = mode,
         .reviewer_model = owned_reviewer,
-        .model_metadata = if (value.object.get("model_metadata")) |metadata| try parse_metadata(alloc, metadata) else &.{},
+        .model_metadata = owned_metadata,
+        .headers = owned_headers,
     };
 }
 
@@ -257,6 +292,53 @@ fn parse_metadata(alloc: Allocator, value: std.json.Value) ParseError![]const Mo
         initialized += 1;
     }
     return models;
+}
+
+fn parse_headers(alloc: Allocator, value: std.json.Value) ParseError![]const Header {
+    if (value != .object) return error.InvalidHeaders;
+    if (value.object.count() > max_headers) return error.LimitExceeded;
+    const headers = try alloc.alloc(Header, value.object.count());
+    var initialized: usize = 0;
+    errdefer {
+        for (headers[0..initialized]) |header| {
+            alloc.free(header.name);
+            alloc.free(header.value);
+        }
+        alloc.free(headers);
+    }
+    var iterator = value.object.iterator();
+    while (iterator.next()) |entry| {
+        try validate_header_name(entry.key_ptr.*);
+        const item = entry.value_ptr.*;
+        if (item != .string) return error.InvalidHeaders;
+        try validate_header_value(item.string);
+        headers[initialized] = .{
+            .name = try alloc.dupe(u8, entry.key_ptr.*),
+            .value = try alloc.dupe(u8, item.string),
+        };
+        initialized += 1;
+    }
+    return headers;
+}
+
+fn validate_header_name(name: []const u8) ParseError!void {
+    if (name.len == 0 or name.len > max_header_name_bytes) return error.InvalidHeaders;
+    for (name) |byte| {
+        const valid = std.ascii.isAlphanumeric(byte) or switch (byte) {
+            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
+            else => false,
+        };
+        if (!valid) return error.InvalidHeaders;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "authorization")) return error.InvalidHeaders;
+}
+
+fn validate_header_value(header_value: []const u8) ParseError!void {
+    if (header_value.len > max_header_value_bytes) return error.LimitExceeded;
+    for (header_value) |byte| {
+        if (byte == '\r' or byte == '\n' or byte == 0) return error.InvalidHeaders;
+        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.InvalidHeaders;
+    }
 }
 
 fn positive_limit(value: ?std.json.Value) ParseError!?u32 {

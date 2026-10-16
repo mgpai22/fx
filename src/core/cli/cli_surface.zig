@@ -11,6 +11,7 @@ const cli_replay = @import("cli_replay.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
 const collections = @import("../shared/collections.zig");
 const config_runtime = @import("../config/config_runtime.zig");
+const configured_provider = @import("../config/configured_provider.zig");
 const credentials = @import("../auth/credentials.zig");
 const model_provider = @import("../config/model_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -346,6 +347,10 @@ const AcpOptions = struct {
     model: ?[]const u8 = null,
     ultrafast_override: ?bool = null,
     log_file: ?[]const u8 = null,
+    /// The libfx kernel over stdio: host tools from `initialize` replace the
+    /// built-in tools, no client MCP, and `FX_CONFIGURED_PROVIDERS` /
+    /// `FX_PROVIDER` pick the model route, as the Node and web cores do.
+    libfx: bool = false,
 };
 
 const WorkflowOptions = struct {
@@ -1137,9 +1142,39 @@ fn runNonInteractiveWithDeps(
         },
         .acp => |rest| {
             const acp_opts = parseAcpArgs(rest) catch {
-                try writeStderr(deps, "usage: fx acp [--model <id>] [--ultrafast|--no-ultrafast] [--log-file <path>]\n");
+                try writeStderr(deps, "usage: fx acp [--model <id>] [--ultrafast|--no-ultrafast] [--log-file <path>] [--libfx]\n");
                 return .handled_failure;
             };
+            // The libfx kernel over stdio mirrors the Node and web cores: host
+            // tools from `initialize` replace built-ins, and the app's own
+            // provider comes from the environment, never settings files.
+            var libfx_provider: ?model_provider.ProviderId = null;
+            if (acp_opts.libfx) {
+                if (io_mod.getenv("FX_PROVIDER")) |raw| {
+                    const parsed = model_provider.parse(raw) orelse {
+                        try writeStderr(deps, "fx: FX_PROVIDER names gateway, codex, grok, or a configured provider\n");
+                        return .handled_failure;
+                    };
+                    libfx_provider = parsed;
+                    if (parsed == .configured) {
+                        // Session metadata rejects an unbound configured
+                        // provider, so bind it here; the hash copies out.
+                        const json = io_mod.getenv("FX_CONFIGURED_PROVIDERS") orelse {
+                            try writeStderr(deps, "fx: FX_PROVIDER names a configured provider but FX_CONFIGURED_PROVIDERS is unset\n");
+                            return .handled_failure;
+                        };
+                        var registry = configured_provider.Registry.parse_json(alloc, json) catch {
+                            try writeStderr(deps, "fx: FX_CONFIGURED_PROVIDERS is not a valid providers object\n");
+                            return .handled_failure;
+                        };
+                        defer registry.deinit(alloc);
+                        libfx_provider = parsed.bind(registry) catch {
+                            try writeStderr(deps, "fx: FX_PROVIDER is not a provider FX_CONFIGURED_PROVIDERS defines\n");
+                            return .handled_failure;
+                        };
+                    }
+                }
+            }
             try cfg.acp_runner.run(alloc, .{
                 .auth_mode = cfg.auth_mode,
                 .default_model = cfg.default_model,
@@ -1151,7 +1186,9 @@ fn runNonInteractiveWithDeps(
                 .provider_set = cfg.provider_set,
                 .process_provider = cfg.process_provider,
                 .secret_store = cfg.secret_store,
-                .prompt_policy = cfg.prompt_policy,
+                // The libfx host owns the system prompt (initialize
+                // instructions); the CLI's coding prompt must not leak in.
+                .prompt_policy = if (acp_opts.libfx) .{ .system_prompt = "" } else cfg.prompt_policy,
                 .ignored_list_entries = cfg.ignored_list_entries,
                 .max_list_entries = cfg.max_list_entries,
                 .max_read_file_bytes = cfg.max_read_file_bytes,
@@ -1168,6 +1205,12 @@ fn runNonInteractiveWithDeps(
                 .model_override = acp_opts.model,
                 .ultrafast_override = acp_opts.ultrafast_override orelse global_args.modifiers.ultrafast_override,
                 .log_file = acp_opts.log_file,
+                .allow_acp_mcp = !acp_opts.libfx,
+                .allow_native_tools = !acp_opts.libfx,
+                .minimal_kernel = acp_opts.libfx,
+                .provider_override = libfx_provider,
+                .home_override = if (acp_opts.libfx) io_mod.getenv("FX_ACP_HOME") else null,
+                .configured_providers_json = if (acp_opts.libfx) io_mod.getenv("FX_CONFIGURED_PROVIDERS") else null,
             });
             return .handled_success;
         },
@@ -3887,6 +3930,8 @@ fn parseAcpArgs(args: []const [:0]const u8) !AcpOptions {
             const enabled = std.mem.eql(u8, args[i], "--ultrafast");
             if (opts.ultrafast_override != null and opts.ultrafast_override.? != enabled) return error.InvalidAcpArgs;
             opts.ultrafast_override = enabled;
+        } else if (std.mem.eql(u8, args[i], "--libfx")) {
+            opts.libfx = true;
         } else if (std.mem.eql(u8, args[i], "--log-file")) {
             if (opts.log_file != null or i + 1 >= args.len) return error.InvalidAcpArgs;
             i += 1;

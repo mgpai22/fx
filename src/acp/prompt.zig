@@ -468,7 +468,9 @@ const AcpContext = struct {
             .permission_rules = session.permission_rules,
             .tool_registry = self.toolRegistry(),
             .host_tool_provider = hostToolProvider(self.state),
-            .permission_reviewer_provider = self.state.cfg.provider_set.select(session.provider).permission_reviewer,
+            // Libfx kernels never auto-classify: the Node and web cores' bundles
+            // carry no reviewer, so every host tool reaches the host's gate.
+            .permission_reviewer_provider = if (self.state.cfg.minimal_kernel) null else self.state.cfg.provider_set.select(session.provider).permission_reviewer,
             .auto_classifier = self.auto_classifier,
             .subagent_host = self.state.subagent_host,
             .subagent_caller_id = session.session_id,
