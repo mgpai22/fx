@@ -64,6 +64,7 @@ const skill_invocation = @import("../core/skills/skill_invocation.zig");
 const context_contract = @import("../core/workspace/context_contract.zig");
 const config_runtime = @import("../core/config/config_runtime.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
+const chat_completions = @import("../gateway/chat_completions.zig");
 const provider_set = @import("../core/gateway/provider_set.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
@@ -2232,10 +2233,19 @@ fn availableModelCapabilities(
 ) model_capabilities.Capabilities {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const session = if (ctx.state.active_session) |*active| active else return .{};
-    return ctx.state.capability_resolver.available(
-        model,
-        ctx.state.cfg.provider_set.select(session.provider).fallbackModelCapabilities(model),
-    );
+    const bundle = ctx.state.cfg.provider_set.select(session.provider);
+    const resolved = ctx.state.capability_resolver.available(model, bundle.fallbackModelCapabilities(model));
+    // Minimal kernels never resolve the model catalog, so a custom provider's
+    // declared model metadata would never reach the compactor and automatic
+    // compaction would never trigger. The definition lookup needs no fetch.
+    if (session.provider == .configured) {
+        if (ctx.state.configured_providers.get(session.provider.label())) |definition| {
+            if (chat_completions.modelMetadataFor(definition, model)) |declared| {
+                return model_capabilities.mergeCapabilities(resolved, declared);
+            }
+        }
+    }
+    return resolved;
 }
 
 fn finalizeTurn(raw_ctx: *anyopaque, turn_id: u64, outcome: types.TurnPresentationOutcome, disposition: ?types.ProviderCompletionDisposition) !void {

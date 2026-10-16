@@ -242,6 +242,13 @@ fn lookup_capabilities(raw: ?*anyopaque, model: []const u8) model_capabilities.C
     const metadata = definition_at(raw).model(model) orelse return .{};
     return model_capabilities.mergeCapabilities(.{}, model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*)));
 }
+/// One configured-provider model's declared metadata, without a catalog
+/// fetch. Null when the definition names no such model. Minimal kernels never
+/// resolve the catalog, so this is how their sessions learn the model's size.
+pub fn modelMetadataFor(definition: *const definitions.Definition, model: []const u8) ?model_capabilities.GatewayMetadata {
+    const metadata = definition.model(model) orelse return null;
+    return model_catalog_metadata.fromCatalogEntry(metadata_entry(metadata.*));
+}
 
 fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) Allocator.Error!catalog.ProviderResult {
     if (input.cancel_flag) |flag| if (flag.load(.seq_cst)) return .{ .failure = .{ .category = .cancellation } };
